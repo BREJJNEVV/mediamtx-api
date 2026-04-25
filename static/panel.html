@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Панель оператора</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 900px;
+            margin: 20px auto;
+            padding: 10px;
+        }
+
+        .section {
+            margin-bottom: 20px;
+            padding: 15px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+        }
+
+        input,
+        button {
+            padding: 8px 12px;
+            font-size: 14px;
+            margin: 3px;
+        }
+
+        video {
+            width: 100%;
+            max-width: 640px;
+            background: #000;
+        }
+
+        #status {
+            color: gray;
+            font-style: italic;
+        }
+
+        .error {
+            color: red;
+        }
+
+        .success {
+            color: green;
+        }
+
+        label {
+            display: inline-block;
+            width: 100px;
+        }
+    </style>
+</head>
+
+<body>
+    <h2>📡 Панель управления стримами</h2>
+
+    <!-- Конфигурация API -->
+    <div class="section">
+        <label>API Gateway:</label>
+        <input type="text" id="apiBase" value="http://192.168.1.34:8080" style="width:250px;">
+        <button onclick="updateApiBase()">Сохранить</button>
+        <span id="status">Не подключён</span>
+    </div>
+
+    <!-- Аутентификация -->
+    <div class="section">
+        <h3>🔑 Вход</h3>
+        <label>Логин:</label>
+        <input type="text" id="username" placeholder="operator">
+        <br>
+        <label>Пароль:</label>
+        <input type="password" id="password" placeholder="supersecret">
+        <br>
+        <button onclick="login()">Войти</button>
+        <span id="loginStatus" class="error"></span>
+    </div>
+
+    <!-- Управление стримом -->
+    <div class="section" id="streamSection" style="display:none;">
+        <h3>🎥 Стрим</h3>
+        <button onclick="startStream()">Запустить стрим</button>
+        <button onclick="stopStream()">Остановить</button>
+        <div>
+            <p><strong>Stream ID:</strong> <span id="streamId">-</span></p>
+            <p><strong>SRT URL (для Larix):</strong> <code id="srtUrl">-</code></p>
+            <p><strong>Просмотр:</strong> <a id="watchLink" href="#" target="_blank">Открыть в плеере</a></p>
+        </div>
+        <div>
+            <video id="videoPlayer" controls autoplay muted playsinline></video>
+        </div>
+        <div id="playerError" class="error"></div>
+    </div>
+
+    <!-- Библиотека HLS -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+
+    <script>
+        let apiBase = localStorage.getItem('apiBase') || "http://192.168.1.34:8080";
+        document.getElementById('apiBase').value = apiBase;
+
+        let token = localStorage.getItem('jwt');
+        // Восстановление сессии
+        if (token) {
+            document.getElementById('status').textContent = 'Активная сессия';
+            document.getElementById('streamSection').style.display = 'block';
+        }
+
+        function updateApiBase() {
+            apiBase = document.getElementById('apiBase').value.trim();
+            localStorage.setItem('apiBase', apiBase);
+            alert('API адрес сохранён');
+        }
+
+        async function login() {
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const statusEl = document.getElementById('loginStatus');
+            statusEl.textContent = 'Вход...';
+            try {
+                const response = await fetch(apiBase + '/api/v1/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.error || 'Ошибка входа');
+                }
+                const data = await response.json();
+                token = data.access_token;
+                localStorage.setItem('jwt', token);
+                statusEl.textContent = 'Успешно!';
+                statusEl.className = 'success';
+                document.getElementById('streamSection').style.display = 'block';
+                document.getElementById('status').textContent = 'Подключён (' + username + ')';
+            } catch (e) {
+                statusEl.textContent = 'Ошибка: ' + e.message;
+                statusEl.className = 'error';
+            }
+        }
+
+        async function startStream() {
+            if (!token) { alert('Сначала войдите'); return; }
+            const statusEl = document.getElementById('playerError');
+            statusEl.textContent = 'Запрос стрима...';
+            try {
+                const response = await fetch(apiBase + '/api/v1/streams/start', {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.error || 'Ошибка запуска');
+                }
+                const data = await response.json();
+                document.getElementById('streamId').textContent = data.stream_id;
+                document.getElementById('srtUrl').textContent = data.srt_url;
+                const watchUrl = data.watch_url;
+                const watchLink = document.getElementById('watchLink');
+                watchLink.href = watchUrl;
+                watchLink.textContent = watchUrl;
+
+                // Запускаем HLS-плеер
+                playHls(watchUrl);
+                statusEl.textContent = '';
+            } catch (e) {
+                statusEl.textContent = 'Ошибка: ' + e.message;
+                statusEl.className = 'error';
+            }
+        }
+
+        function playHls(url) {
+            const video = document.getElementById('videoPlayer');
+            const errorEl = document.getElementById('playerError');
+            if (Hls.isSupported()) {
+                const hls = new Hls();
+                hls.loadSource(url);
+                hls.attachMedia(video);
+                hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                    video.play().catch(e => errorEl.textContent = 'Автовоспроизведение заблокировано: нажмите Play');
+                });
+                hls.on(Hls.Events.ERROR, (event, data) => {
+                    if (data.fatal) {
+                        errorEl.textContent = 'Ошибка HLS: ' + data.type;
+                        console.error(data);
+                    }
+                });
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                // Нативная поддержка HLS (Safari)
+                video.src = url;
+                video.addEventListener('loadedmetadata', () => {
+                    video.play().catch(e => errorEl.textContent = 'Ошибка воспроизведения');
+                });
+            } else {
+                errorEl.textContent = 'Браузер не поддерживает HLS';
+            }
+        }
+
+        function stopStream() {
+            // В текущей реализации просто остановим видео и сбросим UI
+            const video = document.getElementById('videoPlayer');
+            video.pause();
+            video.removeAttribute('src');
+            document.getElementById('streamId').textContent = '-';
+            document.getElementById('srtUrl').textContent = '-';
+            document.getElementById('watchLink').textContent = '#';
+            document.getElementById('watchLink').href = '#';
+            // В будущем можно добавить API вызов для остановки стрима на сервере
+        }
+
+        // Обработчик выхода (можно добавить кнопку Выход)
+    </script>
+</body>
+
+</html>
