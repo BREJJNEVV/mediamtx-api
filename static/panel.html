@@ -1,64 +1,31 @@
 <!DOCTYPE html>
 <html lang="ru">
-
 <head>
     <meta charset="UTF-8">
     <title>Панель оператора</title>
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 900px;
-            margin: 20px auto;
-            padding: 10px;
-        }
-
-        .section {
-            margin-bottom: 20px;
-            padding: 15px;
-            border: 1px solid #ccc;
-            border-radius: 6px;
-        }
-
-        input,
-        button {
-            padding: 8px 12px;
-            font-size: 14px;
-            margin: 3px;
-        }
-
-        video {
-            width: 100%;
-            max-width: 640px;
-            background: #000;
-        }
-
-        #status {
-            color: gray;
-            font-style: italic;
-        }
-
-        .error {
-            color: red;
-        }
-
-        .success {
-            color: green;
-        }
-
-        label {
-            display: inline-block;
-            width: 100px;
-        }
+        body { font-family: Arial, sans-serif; max-width: 1200px; margin: 20px auto; padding: 10px; }
+        .section { margin-bottom: 20px; padding: 15px; border: 1px solid #ccc; border-radius: 6px; }
+        input, button { padding: 8px 12px; font-size: 14px; margin: 3px; }
+        video { width: 100%; max-width: 640px; background: #000; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ddd; padding: 6px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        #status, .error { color: gray; font-style: italic; }
+        .success { color: green; }
+        .error { color: red; }
+        label { display: inline-block; width: 100px; }
+        .play-overlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(0,0,0,0.7); color: white; padding: 10px 20px; border-radius: 4px; cursor: pointer; display: none; }
+        .video-container { position: relative; display: inline-block; }
     </style>
 </head>
-
 <body>
     <h2>📡 Панель управления стримами</h2>
 
     <!-- Конфигурация API -->
     <div class="section">
         <label>API Gateway:</label>
-        <input type="text" id="apiBase" value="http://192.168.1.34:8080" style="width:250px;">
+        <input type="text" id="apiBase" value="" style="width:250px;">
         <button onclick="updateApiBase()">Сохранить</button>
         <span id="status">Не подключён</span>
     </div>
@@ -78,54 +45,100 @@
 
     <!-- Управление стримом -->
     <div class="section" id="streamSection" style="display:none;">
-        <h3>🎥 Стрим</h3>
-        <button onclick="startStream()">Запустить стрим</button>
-        <button onclick="stopStream()">Остановить</button>
+        <h3>🎥 Управление стримом cam1</h3>
+        <button onclick="getStreamUrl()">Получить SRT‑ссылку</button>
+        <button onclick="startView()">▶ Запустить просмотр</button>
+        <button onclick="stopStream()">⏹ Остановить</button>
         <div>
             <p><strong>Stream ID:</strong> <span id="streamId">-</span></p>
             <p><strong>SRT URL (для Larix):</strong> <code id="srtUrl">-</code></p>
             <p><strong>Просмотр:</strong> <a id="watchLink" href="#" target="_blank">Открыть в плеере</a></p>
+            <p><strong>Задержка HLS (стекло‑глаз):</strong> <span id="hlsLatency">-</span> мс</p>
         </div>
-        <div>
+        <div class="video-container">
             <video id="videoPlayer" controls autoplay muted playsinline></video>
+            <div id="playOverlay" class="play-overlay" onclick="manualPlay()">▶ Нажмите для воспроизведения</div>
         </div>
         <div id="playerError" class="error"></div>
     </div>
 
-    <!-- Библиотека HLS -->
-    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <!-- Телеметрия -->
+    <div class="section" id="telemetrySection" style="display:none;">
+        <h3>📊 Активные стримы</h3>
+        <table id="streamsTable">
+            <thead>
+                <tr>
+                    <th>Путь</th>
+                    <th>Разрешение</th>
+                    <th>Зрителей</th>
+                    <th>Битрейт</th>
+                    <th>Издатель (IP)</th>
+                    <th>Потери пакетов</th>
+                    <th>RTT (ms)</th>
+                    <th>SRT задержка (ms)</th>
+                </tr>
+            </thead>
+            <tbody id="streamsBody">
+            </tbody>
+        </table>
+        <div id="telemetryError" class="error"></div>
+    </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <script>
-        let apiBase = localStorage.getItem('apiBase') || "http://192.168.1.34:8080";
+        // ---------- Переменные ----------
+        let apiBase;
+        let token = localStorage.getItem('jwt');
+        let telemetryTimer = null;
+        let currentHls = null;
+        let currentWatchUrl = null;          // запоминаем ссылку для просмотра
+        let latencyInterval = null;
+
+        // ---------- Инициализация адреса API ----------
+        if (window.location.protocol === 'file:') {
+            apiBase = localStorage.getItem('apiBase') || 'http://127.0.0.1:8080';
+        } else {
+            apiBase = window.location.origin;
+        }
+        apiBase = apiBase.replace(/\/$/, '');
         document.getElementById('apiBase').value = apiBase;
 
-        let token = localStorage.getItem('jwt');
-        // Восстановление сессии
         if (token) {
             document.getElementById('status').textContent = 'Активная сессия';
             document.getElementById('streamSection').style.display = 'block';
+            document.getElementById('telemetrySection').style.display = 'block';
+            startTelemetryPolling();
         }
 
         function updateApiBase() {
-            apiBase = document.getElementById('apiBase').value.trim();
+            apiBase = document.getElementById('apiBase').value.trim().replace(/\/$/, '');
             localStorage.setItem('apiBase', apiBase);
-            alert('API адрес сохранён');
+            alert('Адрес API сохранён: ' + apiBase);
+            location.reload();
+        }
+
+        function translateError(err) {
+            if (err.message === 'Failed to fetch') {
+                return 'Не удалось подключиться к серверу. Проверьте API Gateway и порт 8080.';
+            }
+            return err.message;
         }
 
         async function login() {
             const username = document.getElementById('username').value;
             const password = document.getElementById('password').value;
             const statusEl = document.getElementById('loginStatus');
-            statusEl.textContent = 'Вход...';
+            statusEl.textContent = 'Выполняю вход...';
+            statusEl.className = '';
             try {
                 const response = await fetch(apiBase + '/api/v1/auth/login', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password })
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({username, password})
                 });
                 if (!response.ok) {
                     const err = await response.json();
-                    throw new Error(err.error || 'Ошибка входа');
+                    throw new Error(err.error || 'Ошибка входа (код ' + response.status + ')');
                 }
                 const data = await response.json();
                 token = data.access_token;
@@ -133,83 +146,207 @@
                 statusEl.textContent = 'Успешно!';
                 statusEl.className = 'success';
                 document.getElementById('streamSection').style.display = 'block';
+                document.getElementById('telemetrySection').style.display = 'block';
                 document.getElementById('status').textContent = 'Подключён (' + username + ')';
-            } catch (e) {
-                statusEl.textContent = 'Ошибка: ' + e.message;
+                if (telemetryTimer) clearInterval(telemetryTimer);
+                refreshTelemetry();
+                telemetryTimer = setInterval(refreshTelemetry, 5000);
+            } catch(e) {
+                statusEl.textContent = 'Ошибка: ' + translateError(e);
                 statusEl.className = 'error';
             }
         }
 
-        async function startStream() {
+        // 1. Получить SRT‑ссылку (только URL, не запускает плеер)
+        async function getStreamUrl() {
             if (!token) { alert('Сначала войдите'); return; }
-            const statusEl = document.getElementById('playerError');
-            statusEl.textContent = 'Запрос стрима...';
+            const errorEl = document.getElementById('playerError');
+            errorEl.textContent = 'Запрос SRT‑ссылки...';
             try {
                 const response = await fetch(apiBase + '/api/v1/streams/start', {
-                    headers: { 'Authorization': 'Bearer ' + token }
+                    headers: {'Authorization': 'Bearer ' + token}
                 });
                 if (!response.ok) {
                     const err = await response.json();
-                    throw new Error(err.error || 'Ошибка запуска');
+                    throw new Error(err.error || 'Ошибка запроса');
                 }
                 const data = await response.json();
                 document.getElementById('streamId').textContent = data.stream_id;
                 document.getElementById('srtUrl').textContent = data.srt_url;
-                const watchUrl = data.watch_url;
-                const watchLink = document.getElementById('watchLink');
-                watchLink.href = watchUrl;
-                watchLink.textContent = watchUrl;
-
-                // Запускаем HLS-плеер
-                playHls(watchUrl);
-                statusEl.textContent = '';
-            } catch (e) {
-                statusEl.textContent = 'Ошибка: ' + e.message;
-                statusEl.className = 'error';
+                currentWatchUrl = data.watch_url;
+                document.getElementById('watchLink').href = currentWatchUrl;
+                document.getElementById('watchLink').textContent = currentWatchUrl;
+                errorEl.textContent = 'SRT‑ссылка получена. Скопируйте её в Larix и начните вещание.';
+            } catch(e) {
+                errorEl.textContent = 'Ошибка: ' + translateError(e);
             }
         }
 
+        // 2. Запустить просмотр (плеер)
+        function startView() {
+            if (!currentWatchUrl) {
+                alert('Сначала получите SRT‑ссылку');
+                return;
+            }
+            playHls(currentWatchUrl);
+        }
+
+        // ---------- Плеер (с улучшенной синхронизацией) ----------
         function playHls(url) {
             const video = document.getElementById('videoPlayer');
             const errorEl = document.getElementById('playerError');
-            if (Hls.isSupported()) {
-                const hls = new Hls();
-                hls.loadSource(url);
-                hls.attachMedia(video);
-                hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                    video.play().catch(e => errorEl.textContent = 'Автовоспроизведение заблокировано: нажмите Play');
-                });
-                hls.on(Hls.Events.ERROR, (event, data) => {
-                    if (data.fatal) {
-                        errorEl.textContent = 'Ошибка HLS: ' + data.type;
-                        console.error(data);
-                    }
-                });
-            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                // Нативная поддержка HLS (Safari)
-                video.src = url;
-                video.addEventListener('loadedmetadata', () => {
-                    video.play().catch(e => errorEl.textContent = 'Ошибка воспроизведения');
-                });
-            } else {
-                errorEl.textContent = 'Браузер не поддерживает HLS';
+            const latencyEl = document.getElementById('hlsLatency');
+            const playOverlay = document.getElementById('playOverlay');
+
+            // Сброс предыдущего
+            if (currentHls) {
+                currentHls.destroy();
+                currentHls = null;
             }
+            if (latencyInterval) {
+                clearInterval(latencyInterval);
+                latencyInterval = null;
+            }
+            playOverlay.style.display = 'none';
+            errorEl.textContent = '';
+            latencyEl.textContent = '...';
+
+            // Небольшая задержка, чтобы MediaMTX точно создал HLS
+            setTimeout(() => {
+                if (Hls.isSupported()) {
+                    const hls = new Hls({
+                        maxBufferLength: 2,
+                        maxMaxBufferLength: 5,
+                        liveSyncDuration: 2,
+                        liveMaxLatencyDuration: 5,
+                        liveSyncOnStall: true,
+                    });
+                    currentHls = hls;
+
+                    hls.loadSource(url);
+                    hls.attachMedia(video);
+
+                    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                        video.play().then(() => {
+                            playOverlay.style.display = 'none';
+                        }).catch(() => {
+                            playOverlay.style.display = 'block';
+                        });
+                    });
+
+                    // Автоперезапуск при фатальных ошибках
+                    hls.on(Hls.Events.ERROR, (event, data) => {
+                        if (data.fatal) {
+                            errorEl.textContent = 'Фатальная ошибка HLS: ' + data.type + '. Перезапуск через 2 сек...';
+                            setTimeout(() => {
+                                if (currentHls === hls) {
+                                    hls.loadSource(url);
+                                }
+                            }, 2000);
+                        }
+                    });
+
+                    // Обновление задержки каждые 500 мс
+                    latencyInterval = setInterval(() => {
+                        if (currentHls && currentHls.latency != null) {
+                            latencyEl.textContent = Math.round(currentHls.latency * 1000);
+                        }
+                    }, 500);
+
+                } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                    video.src = url;
+                    video.addEventListener('loadedmetadata', () => {
+                        video.play().catch(() => playOverlay.style.display = 'block');
+                    });
+                    latencyEl.textContent = 'неизвестно';
+                } else {
+                    errorEl.textContent = 'Ваш браузер не поддерживает HLS.';
+                }
+            }, 1500);  // можно увеличить до 3000, если нужно
+        }
+
+        function manualPlay() {
+            const video = document.getElementById('videoPlayer');
+            video.play().then(() => {
+                document.getElementById('playOverlay').style.display = 'none';
+            });
         }
 
         function stopStream() {
-            // В текущей реализации просто остановим видео и сбросим UI
             const video = document.getElementById('videoPlayer');
             video.pause();
             video.removeAttribute('src');
+            video.load();
+
+            if (currentHls) {
+                currentHls.destroy();
+                currentHls = null;
+            }
+            if (latencyInterval) {
+                clearInterval(latencyInterval);
+                latencyInterval = null;
+            }
+
             document.getElementById('streamId').textContent = '-';
             document.getElementById('srtUrl').textContent = '-';
             document.getElementById('watchLink').textContent = '#';
             document.getElementById('watchLink').href = '#';
-            // В будущем можно добавить API вызов для остановки стрима на сервере
+            document.getElementById('playerError').textContent = '';
+            document.getElementById('hlsLatency').textContent = '-';
+            document.getElementById('playOverlay').style.display = 'none';
+            currentWatchUrl = null;
         }
 
-        // Обработчик выхода (можно добавить кнопку Выход)
+        // ---------- Телеметрия ----------
+        function startTelemetryPolling() {
+            if (telemetryTimer) clearInterval(telemetryTimer);
+            refreshTelemetry();
+            telemetryTimer = setInterval(refreshTelemetry, 5000);
+        }
+
+        async function refreshTelemetry() {
+            if (!token) return;
+            try {
+                const response = await fetch(apiBase + '/api/v1/streams/status', {
+                    headers: {'Authorization': 'Bearer ' + token}
+                });
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.error || 'Ошибка получения статуса');
+                }
+                const data = await response.json();
+                updateTelemetryTable(data.streams || []);
+                document.getElementById('telemetryError').textContent = '';
+            } catch(e) {
+                document.getElementById('telemetryError').textContent = 'Ошибка: ' + translateError(e);
+            }
+        }
+
+        function updateTelemetryTable(streams) {
+            const tbody = document.getElementById('streamsBody');
+            tbody.innerHTML = '';
+
+            streams.forEach(s => {
+                const row = tbody.insertRow();
+                row.insertCell().textContent = s.path;
+                row.insertCell().textContent = s.resolution || '-';
+                row.insertCell().textContent = s.viewers !== undefined ? s.viewers : '-';
+                row.insertCell().textContent = s.bitrate || '-';
+                const pub = s.publisher || {};
+                row.insertCell().textContent = pub.address || '-';
+                row.insertCell().textContent = pub.packetsLost !== undefined ? pub.packetsLost : '-';
+                row.insertCell().textContent = pub.rtt || '-';
+                row.insertCell().textContent = pub.latency || '-';
+            });
+
+            if (streams.length === 0) {
+                const row = tbody.insertRow();
+                const cell = row.insertCell();
+                cell.colSpan = 8;
+                cell.textContent = 'Нет активных стримов';
+                cell.style.textAlign = 'center';
+            }
+        }
     </script>
 </body>
-
 </html>
