@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Вход в систему</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background: #f0f0f0;
+        }
+
+        .login-box {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            width: 300px;
+        }
+
+        input {
+            width: 100%;
+            padding: 10px;
+            margin: 8px 0;
+            box-sizing: border-box;
+        }
+
+        button {
+            width: 100%;
+            padding: 10px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .error {
+            color: red;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="login-box">
+        <h3>🔑 Вход</h3>
+        <input type="text" id="username" placeholder="Логин">
+        <input type="password" id="password" placeholder="Пароль">
+        <button onclick="login()">Войти</button>
+        <div id="loginStatus" class="error"></div>
+    </div>
+
+    <script>
+        const apiBase = localStorage.getItem('apiBase') || window.location.origin;
+
+        async function login() {
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const statusEl = document.getElementById('loginStatus');
+            statusEl.textContent = 'Выполняю вход...';
+            statusEl.className = '';
+
+            try {
+                const resp = await fetch(apiBase + '/api/v1/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    throw new Error(err.error || 'Ошибка входа');
+                }
+                const data = await resp.json();
+                localStorage.setItem('jwt', data.access_token);
+                localStorage.setItem('apiBase', apiBase);
+                window.location.href = '/dashboard.html';
+            } catch (e) {
+                statusEl.textContent = 'Ошибка: ' + e.message;
+                statusEl.className = 'error';
+            }
+        }
+    </script>
+</body>
+
+</html>

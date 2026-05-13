@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Видеонаблюдение</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 10px;
+        }
+
+        .section {
+            margin-bottom: 20px;
+            padding: 15px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+        }
+
+        video,
+        img {
+            width: 100%;
+            max-width: 640px;
+            background: #000;
+        }
+
+        .controls button {
+            margin: 3px;
+        }
+
+        .play-overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            display: none;
+        }
+
+        .video-container {
+            position: relative;
+            display: inline-block;
+        }
+    </style>
+</head>
+
+<body>
+    <h2>🎥 Видео / Распознавание лиц</h2>
+    <button onclick="window.location.href='/dashboard.html'">← Вернуться к панели</button>
+
+    <div class="section">
+        <div class="video-container">
+            <video id="videoPlayer" controls autoplay muted playsinline></video>
+            <div id="playOverlay" class="play-overlay" onclick="manualPlay()">▶ Нажмите для воспроизведения</div>
+        </div>
+        <p><strong>Задержка HLS:</strong> <span id="hlsLatency">-</span> мс</p>
+        <div class="controls">
+            <button onclick="getStreamUrl()">Получить SRT‑ссылку</button>
+            <button onclick="startView()">▶ Запустить просмотр</button>
+            <button onclick="stopStream()">⏹ Остановить</button>
+        </div>
+        <p><strong>Stream ID:</strong> <span id="streamId">-</span></p>
+        <p><strong>SRT URL:</strong> <code id="srtUrl">-</code></p>
+        <p><strong>Просмотр:</strong> <a id="watchLink" href="#" target="_blank">Открыть в плеере</a></p>
+        <div id="playerError" class="error"></div>
+    </div>
+
+    <div class="section">
+        <h3>🔍 Распознавание лиц</h3>
+        <img id="faceStream" src="http://localhost:9999/stream" style="max-width:100%;">
+        <div id="detections">
+            <p>Нет данных</p>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <script>
+        const token = localStorage.getItem('jwt');
+        const apiBase = localStorage.getItem('apiBase') || window.location.origin;
+        if (!token) window.location.href = '/login.html';
+
+        let currentHls = null, currentWatchUrl = null, latencyInterval = null;
+
+        function playHls(url) {
+            const video = document.getElementById('videoPlayer');
+            const errorEl = document.getElementById('playerError');
+            const playOverlay = document.getElementById('playOverlay');
+            if (currentHls) { currentHls.destroy(); currentHls = null; }
+            if (latencyInterval) { clearInterval(latencyInterval); latencyInterval = null; }
+            playOverlay.style.display = 'none';
+            errorEl.textContent = '';
+
+            setTimeout(() => {
+                if (Hls.isSupported()) {
+                    const hls = new Hls({
+                        maxBufferLength: 2, maxMaxBufferLength: 5,
+                        liveSyncDuration: 2, liveMaxLatencyDuration: 5, liveSyncOnStall: true
+                    });
+                    currentHls = hls;
+                    hls.loadSource(url);
+                    hls.attachMedia(video);
+                    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                        video.play().then(() => playOverlay.style.display = 'none').catch(() => playOverlay.style.display = 'block');
+                    });
+                    hls.on(Hls.Events.ERROR, (e, d) => {
+                        if (d.fatal) {
+                            errorEl.textContent = 'Ошибка HLS: ' + d.type + '. Перезапуск...';
+                            setTimeout(() => { if (currentHls === hls) hls.loadSource(url); }, 2000);
+                        }
+                    });
+                    latencyInterval = setInterval(() => {
+                        if (currentHls && currentHls.latency != null)
+                            document.getElementById('hlsLatency').textContent = Math.round(currentHls.latency * 1000);
+                    }, 500);
+                } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                    video.src = url;
+                    video.addEventListener('loadedmetadata', () => video.play().catch(() => playOverlay.style.display = 'block'));
+                } else {
+                    errorEl.textContent = 'HLS не поддерживается';
+                }
+            }, 1500);
+        }
+
+        async function getStreamUrl() {
+            const resp = await fetch(apiBase + '/api/v1/streams/start', {
+                headers: { 'Authorization': 'Bearer ' + token }
+            });
+            const data = await resp.json();
+            document.getElementById('streamId').textContent = data.stream_id;
+            document.getElementById('srtUrl').textContent = data.srt_url;
+            currentWatchUrl = data.watch_url;
+            document.getElementById('watchLink').href = currentWatchUrl;
+            document.getElementById('watchLink').textContent = currentWatchUrl;
+        }
+
+        function startView() { if (currentWatchUrl) playHls(currentWatchUrl); else alert('Сначала получите SRT-ссылку'); }
+
+        function stopStream() {
+            const video = document.getElementById('videoPlayer');
+            video.pause(); video.removeAttribute('src'); video.load();
+            if (currentHls) { currentHls.destroy(); currentHls = null; }
+            if (latencyInterval) { clearInterval(latencyInterval); latencyInterval = null; }
+            document.getElementById('hlsLatency').textContent = '-';
+        }
+
+        function manualPlay() { document.getElementById('videoPlayer').play().then(() => document.getElementById('playOverlay').style.display = 'none'); }
+
+        // Заглушка распознавания
+        function updateDetections(list) {
+            const div = document.getElementById('detections');
+            if (!list || list.length === 0) { div.innerHTML = '<p>Лица не обнаружены</p>'; return; }
+            div.innerHTML = list.map(d => `<div><strong>${d.name || 'Неизвестный'}</strong>: ${d.confidence.toFixed(1)}%</div>`).join('');
+        }
+        setInterval(() => {
+            updateDetections([
+                { name: 'Иванов И.', confidence: 98.5 },
+                { name: 'Петров П.', confidence: 87.2 }
+            ]);
+        }, 5000);
+    </script>
+</body>
+
+</html>

@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Панель мониторинга</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1400px;
+            margin: 20px auto;
+            padding: 10px;
+        }
+
+        .section {
+            margin-bottom: 20px;
+            padding: 15px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+        }
+
+        table {
+            border-collapse: collapse;
+            width: 100%;
+        }
+
+        th,
+        td {
+            border: 1px solid #ddd;
+            padding: 6px;
+            text-align: left;
+        }
+
+        th {
+            background-color: #f2f2f2;
+        }
+
+        canvas {
+            max-width: 100%;
+        }
+
+        .controls button {
+            margin: 3px;
+        }
+
+        .error {
+            color: red;
+        }
+
+        .success {
+            color: green;
+        }
+    </style>
+</head>
+
+<body>
+    <h2>📊 Панель мониторинга</h2>
+
+    <!-- Кнопки записи -->
+    <div class="section">
+        <h3>🔬 Тестирование канала</h3>
+        <button onclick="startRecording()">🔴 Начать запись метрик</button>
+        <button onclick="stopRecording()">⏹ Остановить и показать статистику</button>
+        <span id="recordStatus" style="margin-left: 10px;"></span>
+        <button style="float:right;" onclick="window.location.href='/video.html'">📹 Перейти к видео</button>
+    </div>
+
+    <!-- Блок статистики (скрыт, показывается после получения результата) -->
+    <div class="section" id="statsSection" style="display:none;">
+        <h3>📋 Статистика записанного сеанса</h3>
+        <div id="statsContent">Нет данных</div>
+    </div>
+
+    <!-- График истории метрик -->
+    <div class="section">
+        <h3>📈 Метрики SRT (последние 50 точек)</h3>
+        <div style="height:300px;">
+            <canvas id="metricsChart"></canvas>
+        </div>
+        <p style="font-size:small; color:#666;">Потери (интервал), RTT (ms), Битрейт (Mbps). Обновление каждые 3 с.</p>
+    </div>
+
+    <!-- Таблица активных стримов -->
+    <div class="section">
+        <h3>📡 Активные стримы</h3>
+        <table id="streamsTable">
+            <thead>
+                <tr>
+                    <th>Путь</th>
+                    <th>Разрешение</th>
+                    <th>Зрителей</th>
+                    <th>Битрейт</th>
+                    <th>Издатель</th>
+                    <th>Потери</th>
+                    <th>RTT</th>
+                    <th>Задержка</th>
+                </tr>
+            </thead>
+            <tbody id="streamsBody"></tbody>
+        </table>
+        <div id="telemetryError" class="error"></div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script>
+        const token = localStorage.getItem('jwt');
+        const apiBase = localStorage.getItem('apiBase') || window.location.origin;
+        if (!token) window.location.href = '/login.html';
+
+        let metricsChart = null;
+        let metricsInterval = null;
+        let telemetryTimer = null;
+        let recordingInProgress = false;
+        // Функция проверки статуса на сервере
+        async function checkRecordingStatus() {
+            try {
+                const resp = await fetch(apiBase + '/api/v1/metrics/record/status', {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                const data = await resp.json();
+                if (data.active) {
+                    recordingInProgress = true;
+                    document.getElementById('recordStatus').innerHTML = '<span style="color:red;">● Запись идёт</span>';
+                } else {
+                    recordingInProgress = false;
+                    document.getElementById('recordStatus').innerHTML = '';
+                }
+            } catch (e) {
+                console.error('Ошибка получения статуса записи', e);
+            }
+        }
+
+        // Вызываем при загрузке страницы
+        checkRecordingStatus();
+
+        // ---------- Запись метрик ----------
+        async function startRecording() {
+            if (recordingInProgress) { alert('Запись уже идёт'); return; }
+            try {
+                const resp = await fetch(apiBase + '/api/v1/metrics/record/start', {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                if (resp.ok) {
+                    recordingInProgress = true;
+                    document.getElementById('recordStatus').innerHTML = '<span style="color:red;">● Запись идёт</span>';
+                } else {
+                    const err = await resp.json();
+                    alert('Ошибка: ' + err.error);
+                }
+            } catch (e) { console.error(e); }
+        }
+
+        async function stopRecording() {
+            if (!recordingInProgress) { alert('Запись не ведётся'); return; }
+            try {
+                const respStop = await fetch(apiBase + '/api/v1/metrics/record/stop', {
+                    method: 'POST',
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                if (!respStop.ok) {
+                    const err = await respStop.json();
+                    alert('Ошибка: ' + err.error);
+                    return;
+                }
+                recordingInProgress = false;
+                document.getElementById('recordStatus').innerHTML = '';
+                const respResult = await fetch(apiBase + '/api/v1/metrics/record/result', {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                if (respResult.ok) {
+                    const data = await respResult.json();
+                    showStats(data.stats);
+                } else {
+                    const err = await respResult.json();
+                    alert('Ошибка получения статистики: ' + err.error);
+                }
+            } catch (e) { console.error(e); }
+        }
+
+        function showStats(stats) {
+            const section = document.getElementById('statsSection');
+            const content = document.getElementById('statsContent');
+            section.style.display = 'block';
+
+            let html = `<p>Длительность: ${stats.duration_sec.toFixed(1)} с, точек: ${stats.count}</p>`;
+
+            if (stats.rtt) {
+                const r = stats.rtt;
+                html += `<h4>RTT (миллисекунды)</h4>
+                <table>
+                <tr><td>Мин.</td><td>${r.min_ms.toFixed(2)}</td></tr>
+                <tr><td>Макс.</td><td>${r.max_ms.toFixed(2)}</td></tr>
+                <tr><td>Среднее</td><td>${r.mean_ms.toFixed(2)}</td></tr>
+                <tr><td>Станд. откл.</td><td>${r.std_dev_ms.toFixed(2)}</td></tr>
+                <tr><td>50-й процентиль</td><td>${r.p50_ms.toFixed(2)}</td></tr>
+                <tr><td>95-й процентиль</td><td>${r.p95_ms.toFixed(2)}</td></tr>
+                <tr><td>99-й процентиль</td><td>${r.p99_ms.toFixed(2)}</td></tr>
+                </table>`;
+            }
+
+            if (stats.bitrate) {
+                const b = stats.bitrate;
+                html += `<h4>Битрейт (Mbps)</h4>
+                <p>Мин: ${b.min_mbps.toFixed(2)}, Макс: ${b.max_mbps.toFixed(2)}, Среднее: ${b.mean_mbps.toFixed(2)}</p>`;
+            }
+
+            if (stats.packet_loss) {
+                html += `<h4>Потери пакетов</h4><p>${stats.packet_loss.note}</p>`;
+            }
+            if (stats.owd) {
+                html += `<h4>OWD</h4><p>${stats.owd.note}</p>`;
+            }
+            if (stats.jitter) {
+                html += `<h4>Джиттер</h4><p>${stats.jitter.note}</p>`;
+            }
+
+            content.innerHTML = html;
+        }
+
+        // ---------- График истории (каждые 3 секунды) ----------
+        async function updateMetricsChart() {
+            try {
+                const resp = await fetch(apiBase + '/api/v1/metrics/history?limit=50', {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                const data = await resp.json();
+                const m = data.metrics || [];
+                if (m.length === 0) return;
+                const labels = m.map(p => new Date(p.timestamp * 1000).toLocaleTimeString());
+                const loss = m.map(p => p.packets_loss);
+                const rtt = m.map(p => p.rtt_ms);
+                const bitrate = m.map(p => p.bitrate_mbps);
+
+                if (!metricsChart) {
+                    const ctx = document.getElementById('metricsChart').getContext('2d');
+                    metricsChart = new Chart(ctx, {
+                        type: 'line',
+                        data: {
+                            labels, datasets: [
+                                { label: 'Потери', data: loss, borderColor: 'red', yAxisID: 'y' },
+                                { label: 'RTT (ms)', data: rtt, borderColor: 'blue', yAxisID: 'y1' },
+                                { label: 'Битрейт (Mbps)', data: bitrate, borderColor: 'green', yAxisID: 'y2' }
+                            ]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            scales: {
+                                y: { beginAtZero: true, position: 'left', title: { display: true, text: 'Потери' } },
+                                y1: { beginAtZero: true, position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: 'RTT (ms)' } },
+                                y2: { beginAtZero: true, position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: 'Битрейт (Mbps)' } }
+                            }
+                        }
+                    });
+                } else {
+                    metricsChart.data.labels = labels;
+                    metricsChart.data.datasets[0].data = loss;
+                    metricsChart.data.datasets[1].data = rtt;
+                    metricsChart.data.datasets[2].data = bitrate;
+                    metricsChart.update();
+                }
+            } catch (e) { console.error('Ошибка графика', e); }
+        }
+
+        // ---------- Таблица активных стримов ----------
+        async function refreshTelemetry() {
+            try {
+                const resp = await fetch(apiBase + '/api/v1/streams/status', {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                const data = await resp.json();
+                const tbody = document.getElementById('streamsBody');
+                tbody.innerHTML = '';
+                data.streams.forEach(s => {
+                    const row = tbody.insertRow();
+                    row.insertCell().textContent = s.path;
+                    row.insertCell().textContent = s.resolution || '-';
+                    row.insertCell().textContent = s.viewers ?? '-';
+                    row.insertCell().textContent = s.bitrate || '-';
+                    row.insertCell().textContent = s.publisher?.address || '-';
+                    row.insertCell().textContent = s.publisher?.packetsLost ?? '-';
+                    row.insertCell().textContent = s.publisher?.rtt || '-';
+                    row.insertCell().textContent = s.publisher?.latency || '-';
+                });
+                document.getElementById('telemetryError').textContent = '';
+            } catch (e) {
+                document.getElementById('telemetryError').textContent = 'Ошибка получения телеметрии';
+            }
+        }
+
+        // ---------- Инициализация ----------
+        updateMetricsChart();
+        refreshTelemetry();
+        metricsInterval = setInterval(updateMetricsChart, 3000);
+        telemetryTimer = setInterval(refreshTelemetry, 5000);
+    </script>
+</body>
+
+</html>s
